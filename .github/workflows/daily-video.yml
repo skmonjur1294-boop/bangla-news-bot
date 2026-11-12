@@ -1,0 +1,83 @@
+name: Daily news video
+
+on:
+  push:
+    branches: [main]
+    paths: ["content/*.json"]
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Bulletin date (YYYY-MM-DD). Empty = newest file in content/"
+        required: false
+      post:
+        description: "Post to Facebook?"
+        type: boolean
+        default: false
+
+concurrency:
+  group: daily-video
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pick bulletin file
+        id: pick
+        run: |
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            f="content/${{ github.event.inputs.date }}.json"
+          else
+            f=$(ls content/*.json | sort | tail -1)
+          fi
+          [ -f "$f" ] || { echo "No bulletin file $f"; exit 1; }
+          echo "file=$f" >> "$GITHUB_OUTPUT"
+          echo "date=$(basename "$f" .json)" >> "$GITHUB_OUTPUT"
+          echo "Using $f"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-noto-color-emoji fonts-noto-core > /dev/null
+          pip install -q -r requirements.txt
+          python -m playwright install --with-deps chromium > /dev/null
+
+      - name: Make video
+        env:
+          TTS_VOICE: ${{ vars.TTS_VOICE || 'bn-BD-PradeepNeural' }}
+        run: python bot/render.py "${{ steps.pick.outputs.file }}"
+
+      - name: Keep video as download (7 days)
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-${{ steps.pick.outputs.date }}
+          path: build/${{ steps.pick.outputs.date }}*
+          retention-days: 7
+
+      - name: Post to Facebook
+        id: fb
+        if: (github.event_name == 'push' && vars.AUTO_POST == 'true') || github.event.inputs.post == 'true'
+        env:
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+          FB_API_VERSION: v27.0
+        run: python bot/post_facebook.py "${{ steps.pick.outputs.file }}" "build/${{ steps.pick.outputs.date }}.mp4"
+
+      - name: Save post log
+        if: steps.fb.outcome == 'success'
+        run: |
+          git config user.name "news-bot"
+          git config user.email "news-bot@users.noreply.github.com"
+          git add posted/
+          git commit -m "Posted ${{ steps.pick.outputs.date }}" || true
+          git push || true
