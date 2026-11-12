@@ -3,7 +3,7 @@ name: Daily news video
 on:
   push:
     branches: [main]
-    paths: ["content/*.json"]
+    paths: ["bangla-news-bot/bangla-news-bot/content/*.json"]
   workflow_dispatch:
     inputs:
       date:
@@ -20,6 +20,10 @@ concurrency:
 
 permissions:
   contents: write
+
+defaults:
+  run:
+    working-directory: bangla-news-bot/bangla-news-bot
 
 jobs:
   build-and-post:
@@ -61,7 +65,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: video-${{ steps.pick.outputs.date }}
-          path: build/${{ steps.pick.outputs.date }}*
+          path: bangla-news-bot/bangla-news-bot/build/${{ steps.pick.outputs.date }}*
           retention-days: 7
 
       - name: Post to Facebook
