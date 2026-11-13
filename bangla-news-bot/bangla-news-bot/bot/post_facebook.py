@@ -34,9 +34,10 @@ def main():
 
     data = json.loads(content.read_text(encoding="utf-8"))
     date = data["date"]
-    log = ROOT / "posted" / f"{date}-facebook.json"
+    post_id = content.stem  # e.g. 2026-11-13-2 -> several posts per day, each only once
+    log = ROOT / "posted" / f"{post_id}-facebook.json"
     if log.exists() and os.environ.get("FORCE_POST") != "true":
-        print(f"Already posted for {date} (see {log}); skipping. Set FORCE_POST=true to post again.")
+        print(f"Already posted {post_id} (see {log}); skipping. Set FORCE_POST=true to post again.")
         return
 
     title = f"{data.get('title', 'দৈনিক সংবাদ বুলেটিন')} – {data.get('date_bn', date)}"
@@ -73,7 +74,7 @@ def main():
     url = f"https://www.facebook.com/{page_id}/videos/{vid}"
     print(f"Uploaded video id {vid}: {url}")
     log.parent.mkdir(exist_ok=True)
-    log.write_text(json.dumps({"date": date, "video_id": vid, "url": url,
+    log.write_text(json.dumps({"date": date, "post": post_id, "video_id": vid, "url": url,
                                "posted_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
                               ensure_ascii=False, indent=2))
     gh_out = os.environ.get("GITHUB_OUTPUT")

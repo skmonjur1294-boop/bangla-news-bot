@@ -162,7 +162,7 @@ def main():
     a = ap.parse_args()
 
     data = json.loads(Path(a.content).read_text(encoding="utf-8"))
-    date = data["date"]
+    date = Path(a.content).stem  # e.g. 2026-11-13-2 (one file per post)
     work = ROOT / "build" / date
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
