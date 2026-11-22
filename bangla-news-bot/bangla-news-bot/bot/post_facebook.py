@@ -10,11 +10,15 @@ Needs two environment variables (saved as GitHub Secrets):
     FB_PAGE_TOKEN   - long-lived Page access token (pages_manage_posts, pages_read_engagement;
                       pages_manage_engagement lets the bot put the source links in the first comment)
 Optional:
-    FB_POST_MODE    - "reel" (default) or "video"
+    FB_POST_MODE    - "reel" (default) or "video"  (the --mode option overrides it)
 
 Usage:
     python bot/post_facebook.py content/2026-11-22-3.json build/2026-11-22-3-reel.mp4
+    # detailed story: full video first, then a Reel teaser that links to it in the first comment
+    python bot/post_facebook.py content/X.json build/X.mp4 --mode video
+    python bot/post_facebook.py content/X.json build/X-reel.mp4 --mode reel --suffix -teaser --full-url URL
 """
+import argparse
 import json
 import os
 import sys
@@ -34,7 +38,7 @@ def fail(msg):
     sys.exit(1)
 
 
-def build_texts(data):
+def build_texts(data, full_url=None):
     """Return (caption, sources_comment). Caption leads with the hook, links go to a comment."""
     title = data.get("title", "সংবাদ বুলেটিন")
     items = data.get("items", [])
@@ -48,7 +52,9 @@ def build_texts(data):
     tags = " ".join(w for l in rest.splitlines() for w in l.split() if w.startswith("#"))
     extra = " ".join(t for t in tags.split() if t not in HASHTAGS.split())
 
-    caption = (f"🔴 {hook}\n\n"
+    lead = "🔴" if data.get("format") != "long" else "📌 বিস্তারিত:"
+    caption = (f"{lead} {hook}\n\n"
+               + ("▶️ পুরো বিস্তারিত ভিডিওর লিংক প্রথম কমেন্টে\n\n" if full_url else "") +
                f"📰 {title} · {data.get('date_bn', data['date'])}\n"
                + "\n".join(story_lines) +
                "\n\n💬 আপনি ইতালির কোন শহরে থাকেন? কমেন্টে লিখুন, আপনার শহরের খবরও জানাব।"
@@ -56,7 +62,9 @@ def build_texts(data):
                + ("\n🔗 সব খবরের সূত্র প্রথম কমেন্টে।" if urls else "") +
                f"\n\n{HASHTAGS} {extra}".rstrip() +
                "\n\n(এই ভিডিওতে AI ভয়েস ব্যবহার করা হয়েছে)")
-    sources = ("📌 আজকের খবরের সূত্র:\n" + "\n".join(urls)) if urls else ""
+    sources = ("📌 খবরের সূত্র:\n" + "\n".join(urls)) if urls else ""
+    if full_url:
+        sources = f"▶️ পুরো বিস্তারিত ভিডিও: {full_url}" + ("\n\n" + sources if sources else "")
     return caption, sources
 
 
@@ -127,21 +135,32 @@ def add_sources(vid, token, sources, caption):
 
 
 def main():
-    content, video = Path(sys.argv[1]), Path(sys.argv[2])
+    ap = argparse.ArgumentParser()
+    ap.add_argument("content")
+    ap.add_argument("video")
+    ap.add_argument("--mode", choices=["reel", "video"], default=os.environ.get("FB_POST_MODE", "reel"))
+    ap.add_argument("--suffix", default="", help="added to the post-log name, e.g. -teaser")
+    ap.add_argument("--full-url", default=None, help="link to the full video (teaser Reels)")
+    a = ap.parse_args()
+    content, video = Path(a.content), Path(a.video)
     page_id = os.environ.get("FB_PAGE_ID")
     token = os.environ.get("FB_PAGE_TOKEN")
     if not page_id or not token:
         fail("FB_PAGE_ID or FB_PAGE_TOKEN secret is missing")
 
     data = json.loads(content.read_text(encoding="utf-8"))
-    post_id = content.stem
+    post_id = content.stem + a.suffix
     log = ROOT / "posted" / f"{post_id}-facebook.json"
     if log.exists() and os.environ.get("FORCE_POST") != "true":
         print(f"Already posted {post_id} (see {log}); skipping. Set FORCE_POST=true to post again.")
+        prev = json.loads(log.read_text(encoding="utf-8")).get("url", "")
+        if os.environ.get("GITHUB_OUTPUT") and prev:
+            with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                f.write(f"url={prev}\n")
         return
 
     title = f"{data.get('title', 'সংবাদ বুলেটিন')} – {data.get('date_bn', data['date'])}"
-    caption, sources = build_texts(data)
+    caption, sources = build_texts(data, a.full_url)
 
     r = requests.get(f"{GRAPH}/{page_id}", params={"fields": "name", "access_token": token}, timeout=30)
     if r.status_code != 200:
@@ -149,7 +168,7 @@ def main():
     print(f"Posting to page: {r.json().get('name')}")
 
     kind = "video"
-    if os.environ.get("FB_POST_MODE", "reel") == "reel":
+    if a.mode == "reel":
         try:
             vid, url = post_reel(page_id, token, video, caption)
             kind = "reel"
