@@ -62,9 +62,21 @@ jobs:
           python -m playwright install --with-deps chromium > /dev/null
 
       - name: Make video
+        id: video
         env:
           TTS_VOICE: ${{ vars.TTS_VOICE || 'bn-BD-PradeepNeural' }}
-        run: python bot/render.py "${{ steps.pick.outputs.file }}"
+          # a little faster speech fits more news into the 90-second Reel
+          TTS_RATE: ${{ vars.TTS_RATE || '+8%' }}
+          POST_MODE: ${{ vars.FB_POST_MODE || 'reel' }}
+        run: |
+          D="${{ steps.pick.outputs.date }}"
+          if [ "$POST_MODE" = "reel" ]; then
+            python bot/render.py "${{ steps.pick.outputs.file }}" --reel
+            echo "mp4=build/$D-reel.mp4" >> "$GITHUB_OUTPUT"
+          else
+            python bot/render.py "${{ steps.pick.outputs.file }}"
+            echo "mp4=build/$D.mp4" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Keep video as download (7 days)
         uses: actions/upload-artifact@v4
@@ -80,7 +92,8 @@ jobs:
           FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
           FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
           FB_API_VERSION: v27.0
-        run: python bot/post_facebook.py "${{ steps.pick.outputs.file }}" "build/${{ steps.pick.outputs.date }}.mp4"
+          FB_POST_MODE: ${{ vars.FB_POST_MODE || 'reel' }}
+        run: python bot/post_facebook.py "${{ steps.pick.outputs.file }}" "${{ steps.video.outputs.mp4 }}"
 
       - name: Save post log
         if: steps.fb.outcome == 'success'
