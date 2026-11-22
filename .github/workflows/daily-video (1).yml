@@ -1,0 +1,133 @@
+name: Daily news video
+
+on:
+  push:
+    branches: [main]
+    paths: ["bangla-news-bot/bangla-news-bot/content/*.json"]
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Bulletin file name without .json (e.g. 2026-11-13-2). Empty = newest"
+        required: false
+      post:
+        description: "Post to Facebook?"
+        type: boolean
+        default: false
+
+concurrency:
+  group: daily-video
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    working-directory: bangla-news-bot/bangla-news-bot
+
+jobs:
+  build-and-post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Pick bulletin file
+        id: pick
+        run: |
+          BEFORE="${{ github.event.before }}"
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            f="content/${{ github.event.inputs.date }}.json"
+          elif [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            # the bulletin file added/changed by this push
+            f=$(git diff --relative --name-only --diff-filter=AM "$BEFORE" "${{ github.sha }}" -- content/ | grep '\.json$' | sort | tail -1)
+          fi
+          [ -n "$f" ] || f=$(ls -t content/*.json | head -1)
+          [ -f "$f" ] || { echo "No bulletin file $f"; exit 1; }
+          echo "file=$f" >> "$GITHUB_OUTPUT"
+          echo "date=$(basename "$f" .json)" >> "$GITHUB_OUTPUT"
+          echo "Using $f"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-noto-color-emoji fonts-noto-core > /dev/null
+          pip install -q -r requirements.txt
+          python -m playwright install --with-deps chromium > /dev/null
+
+      - name: Make video
+        id: video
+        env:
+          TTS_VOICE: ${{ vars.TTS_VOICE || 'bn-BD-PradeepNeural' }}
+          # a little faster speech keeps the pace up and fits more into a 90-second Reel
+          TTS_RATE: ${{ vars.TTS_RATE || '+8%' }}
+          POST_MODE: ${{ vars.FB_POST_MODE || 'reel' }}
+        run: |
+          F="${{ steps.pick.outputs.file }}"
+          D="${{ steps.pick.outputs.date }}"
+          FORMAT=$(python -c "import json,sys; print(json.load(open(sys.argv[1], encoding='utf-8')).get('format', 'bulletin'))" "$F")
+          echo "format=$FORMAT" >> "$GITHUB_OUTPUT"
+          if [ "$FORMAT" = "long" ]; then
+            # detailed story: full video + a short Reel teaser that points to it
+            python bot/render.py "$F"
+            python bot/render.py "$F" --teaser
+            echo "mp4=build/$D.mp4" >> "$GITHUB_OUTPUT"
+            echo "teaser=build/$D-reel.mp4" >> "$GITHUB_OUTPUT"
+          elif [ "$POST_MODE" = "reel" ]; then
+            python bot/render.py "$F" --reel
+            echo "mp4=build/$D-reel.mp4" >> "$GITHUB_OUTPUT"
+          else
+            python bot/render.py "$F"
+            echo "mp4=build/$D.mp4" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Keep video as download (7 days)
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-${{ steps.pick.outputs.date }}
+          path: bangla-news-bot/bangla-news-bot/build/${{ steps.pick.outputs.date }}*.mp4
+          retention-days: 7
+
+      - name: Post to Facebook (bulletin)
+        id: fb
+        if: steps.video.outputs.format != 'long' && ((github.event_name == 'push' && vars.AUTO_POST == 'true') || github.event.inputs.post == 'true')
+        env:
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+          FB_API_VERSION: v27.0
+        run: python bot/post_facebook.py "${{ steps.pick.outputs.file }}" "${{ steps.video.outputs.mp4 }}" --mode "${{ vars.FB_POST_MODE || 'reel' }}"
+
+      - name: Post to Facebook (detailed story - full video)
+        id: fbfull
+        if: steps.video.outputs.format == 'long' && ((github.event_name == 'push' && vars.AUTO_POST == 'true') || github.event.inputs.post == 'true')
+        env:
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+          FB_API_VERSION: v27.0
+        run: python bot/post_facebook.py "${{ steps.pick.outputs.file }}" "${{ steps.video.outputs.mp4 }}" --mode video
+
+      - name: Post to Facebook (detailed story - Reel teaser)
+        id: fbteaser
+        if: steps.fbfull.outcome == 'success'
+        continue-on-error: true
+        env:
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+          FB_API_VERSION: v27.0
+        run: python bot/post_facebook.py "${{ steps.pick.outputs.file }}" "${{ steps.video.outputs.teaser }}" --mode reel --suffix -teaser --full-url "${{ steps.fbfull.outputs.url }}"
+
+      - name: Save post log
+        if: always() && (steps.fb.outcome == 'success' || steps.fbfull.outcome == 'success')
+        run: |
+          git config user.name "news-bot"
+          git config user.email "news-bot@users.noreply.github.com"
+          git add posted/
+          git commit -m "Posted ${{ steps.pick.outputs.date }}" || true
+          git pull --rebase origin main || true
+          git push || true
