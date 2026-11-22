@@ -62,6 +62,22 @@ li:before {{ content:''; position:absolute; left:6px; top:28px; width:16px; heig
 .quote {{ font-size:52px; line-height:1.5; }}
 .ref {{ font-size:32px; opacity:.75; margin-top:26px; }}
 .ai {{ position:absolute; right:40px; bottom:28px; font-size:22px; opacity:.45; }}
+/* ---- Reel layout: keep text out of the areas Facebook covers (bottom caption, right buttons) */
+body.reel .top {{ padding:120px 150px 0 60px; }}
+body.reel .card {{ margin:50px 150px 0 50px; padding:46px 44px 50px; }}
+body.reel h1 {{ font-size:66px; }}
+body.reel li {{ font-size:42px; }}
+body.reel .sub {{ margin:0 150px 430px 50px; font-size:50px; }}
+body.reel .ai {{ top:60px; bottom:auto; right:60px; }}
+.prog {{ position:absolute; top:40px; left:50px; right:50px; display:flex; gap:12px; }}
+.prog i {{ flex:1; height:10px; border-radius:6px; background:rgba(255,255,255,.25); }}
+.prog i.on {{ background:#e9b949; }}
+.hook {{ margin:110px 150px 0 60px; }}
+.hook .lbl {{ display:inline-block; background:#e63946; color:#fff; font-size:40px; font-weight:700;
+  padding:10px 30px; border-radius:12px; margin-bottom:40px; }}
+.hook .emoji {{ font-size:150px; margin-bottom:30px; }}
+.hook h1 {{ font-size:108px; line-height:1.3; color:#ffd166; }}
+.hook p {{ font-size:46px; margin-top:36px; opacity:.9; }}
 """
 
 def esc(s):
@@ -71,10 +87,11 @@ def header(data):
     return f"""<div class="top"><div class="brand">{esc(data.get('title','দৈনিক সংবাদ বুলেটিন'))}
       <small>{esc(data.get('date_bn',''))}</small></div><div class="flag"></div></div>"""
 
-def page(body, subtitle):
+def page(body, subtitle, reel=False):
     sub = f'<div class="sub">{esc(subtitle)}</div>' if subtitle else ""
+    cls = ' class="reel"' if reel else ""
     return f"""<!doctype html><html><head><meta charset="utf-8"><style>{CSS}</style></head>
-      <body>{body}<div class="spacer"></div>{sub}<div class="ai">AI ভয়েস</div></body></html>"""
+      <body{cls}>{body}<div class="spacer"></div>{sub}<div class="ai">AI ভয়েস</div></body></html>"""
 
 def build_segments(data):
     """Return list of (html_body, sentence) pairs in speaking order."""
@@ -114,6 +131,64 @@ def build_segments(data):
     for s in data.get("outro", []):
         segs.append((outro_body, s))
     return segs
+
+REEL_MAX = float(os.environ.get("REEL_MAX_SECONDS", "86"))  # Facebook Reels limit is 90 s
+
+def progress(n, active):
+    return '<div class="prog">' + "".join(f'<i class="{"on" if k <= active else ""}"></i>' for k in range(1, n + 1)) + "</div>"
+
+def build_reel_candidates(data):
+    """Sentences for the short Reel, each with a priority (lower = keep first).
+
+    Order on screen: hook -> one-line greeting -> stories -> short iman line -> follow line.
+    Uses the optional fields "hook" (top level) and "short" (per item) when present,
+    otherwise the headline and the first narration sentences.
+    """
+    items = data.get("items", [])
+    n = len(items) + 1
+    title = data.get("title", "সংবাদ বুলেটিন")
+    hook = data.get("hook") or (items[0]["headline"] if items else title)
+    hdr = header(data)
+    c = []  # (order, priority, body, sentence)
+    hook_body = progress(n, 0) + f"""<div class="hook"><span class="lbl">🔴 ইতালি প্রবাসীদের জন্য</span>
+        <div class="emoji">{esc(items[0].get('emoji','📰') if items else '📰')}</div><h1>{esc(hook)}</h1><p>{esc(data.get('date_bn',''))}</p></div>"""
+    c.append((0, 0, hook_body, hook if hook.endswith(("।", "?", "!")) else hook + "।"))
+    c.append((1, 0, hook_body, f"আসসালামু আলাইকুম, শুনুন আজকের {title}।"))
+    order = 2
+    for i, it in enumerate(items, 1):
+        pts = "".join(f"<li>{esc(p)}</li>" for p in it.get("points", [])[:3])
+        body = progress(n, i) + hdr + f"""<div class="card">
+            <span class="tag">{esc(it.get('tag','খবর'))}</span><span class="num">{i}/{len(items)}</span>
+            <div class="emoji">{esc(it.get('emoji','📰'))}</div>
+            <h1>{esc(it['headline'])}</h1><ul>{pts}</ul></div>"""
+        sents = it.get("short") or it.get("narration", [])
+        for k, sent in enumerate(sents[:3]):
+            # first sentence of every story first, then second sentences, ...; later stories drop first
+            c.append((order, 1 + k * 10 + i, body, sent)); order += 1
+    iman = data.get("iman")
+    if iman and iman.get("text"):
+        ref = iman.get("reference", "").split("—")[0].strip()
+        body = progress(n, n) + hdr + f"""<div class="card"><span class="tag">ঈমানী বার্তা</span>
+            <div class="emoji">🌙</div><div class="quote">{esc(iman['text'])}</div>
+            <div class="ref">{esc(ref)}</div></div>"""
+        c.append((order, 5, body, f"আজকের ঈমানী বার্তা: {iman['text']} {ref}।")); order += 1
+    end = progress(n, n) + hdr + """<div class="big"><div class="emoji">👍</div>
+        <h1>ফলো করুন</h1><p>প্রতিদিন সকাল, দুপুর ও সন্ধ্যায় ইতালির জরুরি খবর</p></div>"""
+    c.append((order, 0, end, "প্রতিদিন তিনবার ইতালির জরুরি খবর পেতে পেজটি ফলো করুন। আল্লাহ হাফেজ।"))
+    return c
+
+def pick_reel(cands, durs, limit):
+    """Keep the most important sentences that fit in `limit` seconds, in speaking order."""
+    keep, total = set(), 0.0
+    for idx in sorted(range(len(cands)), key=lambda j: (cands[j][1], cands[j][0])):
+        if total + durs[idx] <= limit or cands[idx][1] == 0:
+            keep.add(idx); total += durs[idx]
+    # if the must-keep lines pushed us over, drop lowest-priority kept lines
+    for idx in sorted(keep, key=lambda j: -cands[j][1]):
+        if total <= limit: break
+        if cands[idx][1] != 0:
+            keep.discard(idx); total -= durs[idx]
+    return sorted(keep, key=lambda j: cands[j][0])
 
 # ---------------------------------------------------------------- helpers
 def run(cmd):
@@ -159,6 +234,7 @@ def main():
     ap.add_argument("--out", default=None)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--max-segments", type=int, default=0, help="only render first N sentences (testing)")
+    ap.add_argument("--reel", action="store_true", help="make a short (<90 s) Reel instead of the full bulletin")
     a = ap.parse_args()
 
     data = json.loads(Path(a.content).read_text(encoding="utf-8"))
@@ -166,9 +242,22 @@ def main():
     work = ROOT / "build" / date
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
-    out = Path(a.out or ROOT / "build" / f"{date}.mp4")
+    out = Path(a.out or ROOT / "build" / (f"{date}-reel.mp4" if a.reel else f"{date}.mp4"))
 
-    segs = build_segments(data)
+    audio = {}
+    if a.reel:
+        cands = build_reel_candidates(data)
+        durs = []
+        for i, (_, _, _, sent) in enumerate(cands):
+            mp3 = work / f"c{i:03d}.mp3"
+            make_audio(sent, mp3, a.dry_run)
+            durs.append(duration(mp3) + PAUSE)
+        keep = pick_reel(cands, durs, REEL_MAX)
+        segs = [(cands[j][2], cands[j][3]) for j in keep]
+        audio = {n: work / f"c{j:03d}.mp3" for n, j in enumerate(keep)}
+        print(f"reel: {len(keep)}/{len(cands)} sentences, ~{sum(durs[j] for j in keep):.0f} s")
+    else:
+        segs = build_segments(data)
     if a.max_segments:
         segs = segs[: a.max_segments]
     print(f"{len(segs)} sentences to render")
@@ -179,7 +268,7 @@ def main():
         b = p.chromium.launch()
         pg = b.new_page(viewport={"width": W, "height": H})
         for i, (body, sent) in enumerate(segs):
-            pg.set_content(page(body, sent), wait_until="load")
+            pg.set_content(page(body, sent, a.reel), wait_until="load")
             pg.evaluate("document.fonts.ready")
             pg.screenshot(path=str(work / f"{i:03d}.png"))
         b.close()
@@ -188,14 +277,18 @@ def main():
     clips = []
     for i, (_, sent) in enumerate(segs):
         print(f"  [{i+1}/{len(segs)}] {sent[:50]}")
-        mp3 = work / f"{i:03d}.mp3"
-        make_audio(sent, mp3, a.dry_run)
+        mp3 = audio.get(i) or work / f"{i:03d}.mp3"
+        if i not in audio:
+            make_audio(sent, mp3, a.dry_run)
         d = duration(mp3) + PAUSE
         clip = work / f"{i:03d}.mp4"
+        # slow push-in so the frame is never completely still (helps people keep watching)
+        vf = (f"scale=w='trunc({W}*(1+0.035*t/{d:.3f})/2)*2':h=-2:eval=frame,"
+              f"crop={W}:{H},setsar=1,format=yuv420p")
         run(["ffmpeg", "-y", "-loop", "1", "-framerate", "30", "-i", str(work / f"{i:03d}.png"),
-             "-i", str(mp3), "-af", f"apad=pad_dur={PAUSE}", "-t", f"{d:.3f}",
-             "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage", "-pix_fmt", "yuv420p",
-             "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", str(clip)])
+             "-i", str(mp3), "-af", f"apad=pad_dur={PAUSE}", "-t", f"{d:.3f}", "-vf", vf,
+             "-c:v", "libx264", "-preset", "veryfast", "-r", "30",
+             "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2", str(clip)])
         clips.append(clip)
 
     # 4) join
